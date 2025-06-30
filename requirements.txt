@@ -1,0 +1,4 @@
+requests==2.31.0
+python-dotenv==1.0.1
+smtplib3==2.0.0
+email-validator==2.1.0.post1
