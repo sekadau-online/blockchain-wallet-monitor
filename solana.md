@@ -1,0 +1,1 @@
+pip install requests aiohttp python-telegram-bot
