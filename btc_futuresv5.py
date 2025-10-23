@@ -14,10 +14,10 @@ CONFIG = {
     "TELEGRAM_CHAT_ID": "-4848345455",
     
     # Trading Symbols
-    "SYMBOLS": ["BTCUSDT", "ETHUSDT", "ADAUSDT", "DOTUSDT", "LINKUSDT"],
+	"SYMBOLS": ["BTCUSDT", "ETHUSDT", "ADAUSDT", "DOTUSDT", "LINKUSDT"],
     
     # Analysis Timing
-    "INTERVAL": 60 * 5,  # 5 menit dalam detik
+    "INTERVAL": 60 * 1,  # 1 menit dalam detik
     "TIMEZONE": "Asia/Pontianak",
     
     # Risk Management
@@ -150,10 +150,10 @@ class EnhancedFuturesAnalyzer:
             self.volume_history[symbol] = deque(maxlen=config["VOLUME_HISTORY_LENGTH"])
             self.price_history[symbol] = deque(maxlen=config["PRICE_HISTORY_LENGTH"])
 
-    def get_pontianak_time(self):
+    def get_local_time(self):
         utc_time = datetime.datetime.now(datetime.timezone.utc)
-        pontianak_time = utc_time + datetime.timedelta(hours=7)
-        return pontianak_time.strftime("%Y-%m-%d %H:%M:%S")
+        local_time = utc_time + datetime.timedelta(hours=7)
+        return local_time.strftime("%Y-%m-%d %H:%M:%S")
 
     def safe_get(self, url: str, max_retries: int = None):
         if max_retries is None:
@@ -734,11 +734,11 @@ class EnhancedFuturesAnalyzer:
             entry_signal = self.generate_entry_signals(symbol_data, technicals, volume_analysis)
             recommendation = self.get_risk_recommendation(symbol, score, price_data, entry_signal)
 
-            pontianak_time = self.get_pontianak_time()
+            local_time = self.get_local_time()
 
             message = (
                 f"<b>🎯 {symbol} FUTURES ANALYSIS</b>\n"
-                f"⏰ Waktu: {pontianak_time} (Pontianak)\n\n"
+                f"⏰ Waktu: {local_time} ({self.config['TIMEZONE']})\n\n"
 
                 f"<b>📈 PRICE INFO:</b>\n"
                 f"💰 Price: <code>${price_data['price']:,.2f}</code>\n"
