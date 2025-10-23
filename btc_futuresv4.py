@@ -7,11 +7,13 @@ CONFIG = {
     "TELEGRAM_BOT_TOKEN": "8345066310:AAElrMezSmJZwWOWWRYLFMf2z5nyDCkTg0g",
     "TELEGRAM_CHAT_ID": "-4848345455",
     "SYMBOLS": ["BTCUSDT", "ETHUSDT", "ADAUSDT"],
-    "INTERVAL": 60 * 3,  # 3 menit
+    "INTERVAL": 60 * 5,  # 5 menit untuk avoid rate limit
     "TIMEZONE": "Asia/Pontianak",  # UTC+7
     "RISK_LEVEL": "MEDIUM",  # LOW, MEDIUM, HIGH
     "VOLUME_THRESHOLD": 1.5,  # Threshold volume spike
     "MIN_VOLUME": 1000000,  # Minimum volume dalam USDT
+    "MAX_RETRIES": 3,
+    "REQUEST_DELAY": 1,  # Delay antara requests
 }
 
 BASE = "https://fapi.binance.com"
@@ -20,6 +22,9 @@ class EnhancedFuturesAnalyzer:
     def __init__(self, config: Dict):
         self.config = config
         self.session = requests.Session()
+        self.session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        })
         self.analysis_history = {}
         self.volume_history = {}
         self.price_history = {}
@@ -35,20 +40,41 @@ class EnhancedFuturesAnalyzer:
         pontianak_time = utc_time + datetime.timedelta(hours=7)
         return pontianak_time.strftime("%Y-%m-%d %H:%M:%S")
 
-    def safe_get(self, url: str, max_retries: int = 3):
+    def safe_get(self, url: str, max_retries: int = None):
+        """Enhanced safe_get dengan better error handling"""
+        if max_retries is None:
+            max_retries = self.config["MAX_RETRIES"]
+            
         for attempt in range(max_retries):
             try:
-                response = self.session.get(url, timeout=15)
+                time.sleep(self.config["REQUEST_DELAY"])  # Jeda antara requests
+                response = self.session.get(url, timeout=20)
+                
                 if response.status_code == 200:
                     return response.json()
                 elif response.status_code == 429:
-                    wait_time = (2 ** attempt) + 5
-                    print(f"⚠️ Rate limit, waiting {wait_time}s...")
+                    wait_time = (2 ** attempt) + 10  # Wait longer for rate limit
+                    print(f"⚠️ Rate limit detected, waiting {wait_time}s...")
                     time.sleep(wait_time)
+                elif response.status_code == 418:  # IP banned
+                    wait_time = 300  # Wait 5 minutes
+                    print(f"🚫 IP Banned, waiting {wait_time}s...")
+                    time.sleep(wait_time)
+                else:
+                    print(f"⚠️ HTTP {response.status_code}, retrying...")
+                    time.sleep(5)
+                    
+            except requests.exceptions.Timeout:
+                print(f"⚠️ Timeout attempt {attempt + 1}, retrying...")
+                time.sleep(10)
+            except requests.exceptions.ConnectionError:
+                print(f"⚠️ Connection error attempt {attempt + 1}, retrying...")
+                time.sleep(10)
             except Exception as e:
                 print(f"⚠️ Attempt {attempt + 1} failed: {e}")
-                time.sleep(3)
-        raise Exception(f"Failed to fetch data from {url}")
+                time.sleep(5)
+                
+        raise Exception(f"Failed to fetch data from {url} after {max_retries} attempts")
 
     def send_telegram(self, message: str, symbol: str = "GLOBAL"):
         """Kirim pesan ke Telegram dengan formatting yang lebih baik"""
@@ -60,7 +86,7 @@ class EnhancedFuturesAnalyzer:
                 "parse_mode": "HTML",
                 "disable_web_page_preview": True
             }
-            response = self.session.post(url, json=payload, timeout=10)
+            response = self.session.post(url, json=payload, timeout=15)
             if response.status_code == 200:
                 print(f"✅ [{symbol}] Pesan terkirim ke Telegram")
             else:
@@ -69,60 +95,107 @@ class EnhancedFuturesAnalyzer:
             print(f"⚠️ [{symbol}] Error Telegram: {e}")
 
     def get_funding_rate(self, symbol: str) -> float:
-        url = f"{BASE}/fapi/v1/fundingRate?symbol={symbol}&limit=3"
-        data = self.safe_get(url)
-        return float(data[0]["fundingRate"])
+        """Dapatkan funding rate dengan fallback"""
+        try:
+            url = f"{BASE}/fapi/v1/fundingRate?symbol={symbol}&limit=1"
+            data = self.safe_get(url)
+            return float(data[0]["fundingRate"])
+        except:
+            return 0.0
 
     def get_open_interest(self, symbol: str) -> tuple:
-        url = f"{BASE}/futures/data/openInterestHist?symbol={symbol}&period=5m&limit=30"
-        data = self.safe_get(url)
-        times = [datetime.datetime.fromtimestamp(x["timestamp"]/1000) for x in data]
-        values = [float(x["sumOpenInterest"]) for x in data]
-        return times, values
+        """Dapatkan open interest data"""
+        try:
+            url = f"{BASE}/futures/data/openInterestHist?symbol={symbol}&period=5m&limit=10"
+            data = self.safe_get(url)
+            if not data:
+                return [], [0]
+            times = [datetime.datetime.fromtimestamp(x["timestamp"]/1000) for x in data]
+            values = [float(x["sumOpenInterest"]) for x in data]
+            return times, values
+        except:
+            return [], [0]
 
     def get_taker_ratio(self, symbol: str) -> float:
-        url = f"{BASE}/futures/data/takerlongshortRatio?symbol={symbol}&period=5m&limit=10"
-        data = self.safe_get(url)
-        return float(data[0]["buySellRatio"])
+        """Dapatkan taker buy/sell ratio"""
+        try:
+            url = f"{BASE}/futures/data/takerlongshortRatio?symbol={symbol}&period=5m&limit=5"
+            data = self.safe_get(url)
+            return float(data[0]["buySellRatio"]) if data else 1.0
+        except:
+            return 1.0
 
     def get_long_short_ratio(self, symbol: str) -> tuple:
-        url = f"{BASE}/futures/data/topLongShortAccountRatio?symbol={symbol}&period=5m&limit=10"
-        data = self.safe_get(url)
-        long_ratio = float(data[0]["longAccount"])
-        short_ratio = float(data[0]["shortAccount"])
-        return long_ratio, short_ratio
+        """Dapatkan long/short ratio"""
+        try:
+            url = f"{BASE}/futures/data/topLongShortAccountRatio?symbol={symbol}&period=5m&limit=5"
+            data = self.safe_get(url)
+            if data:
+                long_ratio = float(data[0]["longAccount"])
+                short_ratio = float(data[0]["shortAccount"])
+                return long_ratio, short_ratio
+        except:
+            pass
+        return 0.5, 0.5  # Default netral
 
     def get_price_data(self, symbol: str) -> Dict:
-        url = f"{BASE}/fapi/v1/ticker/24hr?symbol={symbol}"
-        data = self.safe_get(url)
-        return {
-            "price": float(data["lastPrice"]),
-            "change_24h": float(data["priceChangePercent"]),
-            "high_24h": float(data["highPrice"]),
-            "low_24h": float(data["lowPrice"]),
-            "volume": float(data["volume"]),
-            "quote_volume": float(data["quoteVolume"]),
-            "price_change": float(data["priceChange"]),
-            "count": int(data["count"])
-        }
+        """Dapatkan data harga 24h"""
+        try:
+            url = f"{BASE}/fapi/v1/ticker/24hr?symbol={symbol}"
+            data = self.safe_get(url)
+            return {
+                "price": float(data["lastPrice"]),
+                "change_24h": float(data["priceChangePercent"]),
+                "high_24h": float(data["highPrice"]),
+                "low_24h": float(data["lowPrice"]),
+                "volume": float(data["volume"]),
+                "quote_volume": float(data["quoteVolume"]),
+                "price_change": float(data["priceChange"]),
+                "count": int(data["count"])
+            }
+        except Exception as e:
+            print(f"⚠️ Error getting price data for {symbol}: {e}")
+            # Return default data
+            return {
+                "price": 0,
+                "change_24h": 0,
+                "high_24h": 0,
+                "low_24h": 0,
+                "volume": 0,
+                "quote_volume": 0,
+                "price_change": 0,
+                "count": 0
+            }
 
     def get_market_depth(self, symbol: str) -> Dict:
-        """Dapatkan data market depth (order book)"""
-        url = f"{BASE}/fapi/v1/depth?symbol={symbol}&limit=15"
-        data = self.safe_get(url)
-        bids = sum(float(bid[1]) * float(bid[0]) for bid in data["bids"][:8])
-        asks = sum(float(ask[1]) * float(ask[0]) for ask in data["asks"][:8])
-        total_bids = sum(float(bid[1]) for bid in data["bids"][:8])
-        total_asks = sum(float(ask[1]) for ask in data["asks"][:8])
-        
-        return {
-            "bids_value": bids,
-            "asks_value": asks, 
-            "bids_volume": total_bids,
-            "asks_volume": total_asks,
-            "pressure": bids/asks if asks > 0 else 1,
-            "volume_pressure": total_bids/total_asks if total_asks > 0 else 1
-        }
+        """Dapatkan data market depth (order book) dengan fallback"""
+        try:
+            url = f"{BASE}/fapi/v1/depth?symbol={symbol}&limit=10"  # Reduced limit
+            data = self.safe_get(url, max_retries=2)  # Fewer retries for depth
+            
+            bids = sum(float(bid[1]) * float(bid[0]) for bid in data["bids"][:5])  # Only 5 levels
+            asks = sum(float(ask[1]) * float(ask[0]) for ask in data["asks"][:5])
+            total_bids = sum(float(bid[1]) for bid in data["bids"][:5])
+            total_asks = sum(float(ask[1]) for ask in data["asks"][:5])
+            
+            return {
+                "bids_value": bids,
+                "asks_value": asks, 
+                "bids_volume": total_bids,
+                "asks_volume": total_asks,
+                "pressure": bids/asks if asks > 0 else 1,
+                "volume_pressure": total_bids/total_asks if total_asks > 0 else 1
+            }
+        except Exception as e:
+            print(f"⚠️ Depth data unavailable for {symbol}, using defaults")
+            return {
+                "bids_value": 1,
+                "asks_value": 1, 
+                "bids_volume": 1,
+                "asks_volume": 1,
+                "pressure": 1,
+                "volume_pressure": 1
+            }
 
     def calculate_volume_analysis(self, symbol: str, current_volume: float) -> Dict:
         """Analisis volume dengan historical comparison"""
@@ -131,8 +204,8 @@ class EnhancedFuturesAnalyzer:
         # Tambahkan volume saat ini ke history
         volume_history.append(current_volume)
         
-        if len(volume_history) < 5:
-            return {"volume_spike": False, "volume_trend": "INSUFFICIENT_DATA"}
+        if len(volume_history) < 3:  # Reduced minimum data requirement
+            return {"volume_spike": False, "volume_trend": "INSUFFICIENT_DATA", "volume_ratio": 1.0}
         
         # Hitung volume average
         avg_volume = np.mean(list(volume_history))
@@ -142,15 +215,15 @@ class EnhancedFuturesAnalyzer:
         volume_spike = volume_ratio > self.config["VOLUME_THRESHOLD"]
         
         # Tentukan trend volume
-        if len(volume_history) >= 10:
-            recent_volumes = list(volume_history)[-5:]
-            older_volumes = list(volume_history)[-10:-5]
+        if len(volume_history) >= 6:  # Reduced requirement
+            recent_volumes = list(volume_history)[-3:]
+            older_volumes = list(volume_history)[-6:-3]
             recent_avg = np.mean(recent_volumes)
             older_avg = np.mean(older_volumes)
             
-            if recent_avg > older_avg * 1.2:
+            if recent_avg > older_avg * 1.15:  # Reduced threshold
                 volume_trend = "INCREASING"
-            elif recent_avg < older_avg * 0.8:
+            elif recent_avg < older_avg * 0.85:
                 volume_trend = "DECREASING"
             else:
                 volume_trend = "STABLE"
@@ -166,17 +239,18 @@ class EnhancedFuturesAnalyzer:
         }
 
     def calculate_advanced_technicals(self, symbol: str) -> Dict:
-        """Hitung indikator teknikal yang lebih advanced"""
+        """Hitung indikator teknikal yang lebih advanced dengan fallback"""
         try:
-            # Ambil data kline dengan berbagai timeframe
-            timeframes = ['5m', '15m', '1h']
+            # Gunakan timeframe yang lebih sedikit untuk mengurangi requests
+            timeframes = ['15m']  # Hanya 15m untuk mengurangi load
+            
             technicals = {}
             
             for tf in timeframes:
-                url = f"{BASE}/fapi/v1/klines?symbol={symbol}&interval={tf}&limit=50"
-                data = self.safe_get(url)
+                url = f"{BASE}/fapi/v1/klines?symbol={symbol}&interval={tf}&limit=30"  # Reduced limit
+                data = self.safe_get(url, max_retries=2)
                 
-                if not data:
+                if not data or len(data) < 20:
                     continue
                     
                 closes = np.array([float(c[4]) for c in data])
@@ -186,7 +260,7 @@ class EnhancedFuturesAnalyzer:
                 
                 # Simple Moving Averages
                 sma_20 = np.mean(closes[-20:])
-                sma_50 = np.mean(closes[-50:]) if len(closes) >= 50 else sma_20
+                sma_10 = np.mean(closes[-10:])
                 
                 # Exponential Moving Average (approximated)
                 ema_12 = self.calculate_ema(closes, 12)
@@ -195,29 +269,27 @@ class EnhancedFuturesAnalyzer:
                 # RSI
                 rsi = self.calculate_rsi(closes)
                 
-                # MACD
-                macd, macd_signal = self.calculate_macd(closes)
+                # Support Resistance sederhana
+                resistance = np.max(highs[-10:])
+                support = np.min(lows[-10:])
                 
-                # Support Resistance dengan metode swing points
-                resistance, support = self.calculate_support_resistance(highs, lows)
-                
-                # Volume Weighted Average Price (VWAP)
-                vwap = np.sum(volumes * closes) / np.sum(volumes) if np.sum(volumes) > 0 else closes[-1]
+                # Trend sederhana
+                price_trend = "BULLISH" if closes[-1] > sma_20 else "BEARISH"
+                if ema_12 > ema_26 and closes[-1] > sma_20:
+                    price_trend = "STRONG_BULLISH"
+                elif ema_12 < ema_26 and closes[-1] < sma_20:
+                    price_trend = "STRONG_BEARISH"
                 
                 technicals[tf] = {
+                    "sma_10": sma_10,
                     "sma_20": sma_20,
-                    "sma_50": sma_50,
                     "ema_12": ema_12,
                     "ema_26": ema_26,
                     "rsi": rsi,
-                    "macd": macd,
-                    "macd_signal": macd_signal,
-                    "macd_histogram": macd - macd_signal,
                     "resistance": resistance,
                     "support": support,
-                    "vwap": vwap,
-                    "trend": "BULLISH" if ema_12 > ema_26 and sma_20 > sma_50 else "BEARISH",
-                    "momentum": ((closes[-1] - closes[-10]) / closes[-10]) * 100
+                    "trend": price_trend,
+                    "momentum": ((closes[-1] - closes[-5]) / closes[-5]) * 100
                 }
                 
             return technicals
@@ -231,166 +303,148 @@ class EnhancedFuturesAnalyzer:
         if len(prices) < period:
             return float(prices[-1])
         
-        weights = np.exp(np.linspace(-1., 0., period))
-        weights /= weights.sum()
-        
-        return np.convolve(prices[-period:], weights, mode='valid')[-1]
+        try:
+            weights = np.exp(np.linspace(-1., 0., period))
+            weights /= weights.sum()
+            
+            return np.convolve(prices[-period:], weights, mode='valid')[-1]
+        except:
+            return float(prices[-1])
 
     def calculate_rsi(self, prices: np.array, period: int = 14) -> float:
         """Hitung Relative Strength Index"""
         if len(prices) < period + 1:
             return 50
             
-        deltas = np.diff(prices)
-        gains = np.where(deltas > 0, deltas, 0)
-        losses = np.where(deltas < 0, -deltas, 0)
-        
-        avg_gains = np.mean(gains[-period:])
-        avg_losses = np.mean(losses[-period:])
-        
-        if avg_losses == 0:
-            return 100
+        try:
+            deltas = np.diff(prices)
+            gains = np.where(deltas > 0, deltas, 0)
+            losses = np.where(deltas < 0, -deltas, 0)
             
-        rs = avg_gains / avg_losses
-        rsi = 100 - (100 / (1 + rs))
-        
-        return rsi
-
-    def calculate_macd(self, prices: np.array) -> Tuple[float, float]:
-        """Hitung MACD"""
-        if len(prices) < 26:
-            return 0, 0
+            avg_gains = np.mean(gains[-period:])
+            avg_losses = np.mean(losses[-period:])
             
-        ema_12 = self.calculate_ema(prices, 12)
-        ema_26 = self.calculate_ema(prices, 26)
-        macd = ema_12 - ema_26
-        macd_signal = self.calculate_ema(prices[-9:], 9)  # Signal line EMA 9 dari MACD
-        
-        return macd, macd_signal
-
-    def calculate_support_resistance(self, highs: np.array, lows: np.array) -> Tuple[float, float]:
-        """Hitung support dan resistance levels"""
-        if len(highs) < 20 or len(lows) < 20:
-            return max(highs), min(lows)
-        
-        # Simple method: recent high/low sebagai S/R
-        resistance = np.max(highs[-10:])
-        support = np.min(lows[-10:])
-        
-        return resistance, support
+            if avg_losses == 0:
+                return 100
+                
+            rs = avg_gains / avg_losses
+            rsi = 100 - (100 / (1 + rs))
+            
+            return rsi
+        except:
+            return 50
 
     def generate_entry_signals(self, symbol_data: Dict, technicals: Dict, volume_analysis: Dict) -> Dict:
         """Generate sinyal entry long/short yang spesifik"""
         price_data = symbol_data["price_data"]
         current_price = price_data["price"]
         
+        if current_price == 0:  # Invalid price data
+            return {
+                "action": "HOLD",
+                "direction": "NEUTRAL", 
+                "confidence": 0,
+                "entry_price": 0,
+                "take_profit": [],
+                "stop_loss": 0,
+                "reason": ["Invalid price data"]
+            }
+        
         # Default signal
         signal = {
             "action": "HOLD",
             "direction": "NEUTRAL", 
             "confidence": 0,
-            "entry_price": 0,
+            "entry_price": current_price,
             "take_profit": [],
             "stop_loss": 0,
             "reason": []
         }
         
-        # Analisis multi-timeframe
-        tf_5m = technicals.get('5m', {})
+        # Analisis technical
         tf_15m = technicals.get('15m', {})
-        tf_1h = technicals.get('1h', {})
+        if not tf_15m:
+            signal["reason"].append("Insufficient technical data")
+            return signal
         
         # Skor bullish/bearish
         bull_score = 0
         bear_score = 0
         reasons = []
         
-        # 1. Trend Analysis (30%)
-        if tf_1h.get('trend') == 'BULLISH':
+        # 1. Trend Analysis
+        trend = tf_15m.get('trend', 'NEUTRAL')
+        if 'BULLISH' in trend:
             bull_score += 3
-            reasons.append("📈 Trend 1H Bullish")
-        elif tf_1h.get('trend') == 'BEARISH':
+            reasons.append("📈 Trend Bullish")
+        elif 'BEARISH' in trend:
             bear_score += 3
-            reasons.append("📉 Trend 1H Bearish")
+            reasons.append("📉 Trend Bearish")
             
-        if tf_15m.get('trend') == 'BULLISH':
+        # 2. RSI Analysis
+        rsi = tf_15m.get('rsi', 50)
+        if rsi < 35:
             bull_score += 2
-            reasons.append("📈 Trend 15M Bullish")
-        elif tf_15m.get('trend') == 'BEARISH':
-            bear_score += 2
-            reasons.append("📉 Trend 15M Bearish")
-            
-        # 2. Momentum Analysis (25%)
-        rsi_5m = tf_5m.get('rsi', 50)
-        if rsi_5m < 30:
-            bull_score += 2.5
             reasons.append("🔻 RSI Oversold")
-        elif rsi_5m > 70:
-            bear_score += 2.5
+        elif rsi > 65:
+            bear_score += 2
             reasons.append("🔺 RSI Overbought")
             
-        macd_hist_5m = tf_5m.get('macd_histogram', 0)
-        if macd_hist_5m > 0:
-            bull_score += 1.5
-            reasons.append("📊 MACD Bullish")
-        else:
-            bear_score += 1.5
-            reasons.append("📊 MACD Bearish")
+        # 3. Price vs Moving Averages
+        sma_20 = tf_15m.get('sma_20', current_price)
+        if current_price > sma_20 * 1.01:
+            bull_score += 1
+            reasons.append("💰 Price above SMA20")
+        elif current_price < sma_20 * 0.99:
+            bear_score += 1
+            reasons.append("💰 Price below SMA20")
             
-        # 3. Volume Analysis (20%)
+        # 4. Volume Analysis
         if volume_analysis.get('volume_spike'):
             if symbol_data["sentiment_score"] > 0:
                 bull_score += 2
-                reasons.append("💰 Volume Spike Bullish")
+                reasons.append("📊 Volume Spike Bullish")
             else:
                 bear_score += 2
-                reasons.append("💰 Volume Spike Bearish")
+                reasons.append("📊 Volume Spike Bearish")
                 
-        # 4. Price Action (15%)
-        support = tf_5m.get('support', 0)
-        resistance = tf_5m.get('resistance', 0)
-        
-        if current_price > support * 1.01 and current_price < support * 1.02:
-            bull_score += 1.5
-            reasons.append("🛡️ Near Support Bounce")
-        elif current_price < resistance * 0.99 and current_price > resistance * 0.98:
-            bear_score += 1.5
-            reasons.append("🎯 Near Resistance Rejection")
-            
-        # 5. Market Structure (10%)
-        if tf_5m.get('ema_12', 0) > tf_5m.get('ema_26', 0) and tf_15m.get('ema_12', 0) > tf_15m.get('ema_26', 0):
-            bull_score += 1
-            reasons.append("⚡ EMA Alignment Bullish")
-        elif tf_5m.get('ema_12', 0) < tf_5m.get('ema_26', 0) and tf_15m.get('ema_12', 0) < tf_15m.get('ema_26', 0):
-            bear_score += 1
-            reasons.append("⚡ EMA Alignment Bearish")
+        # 5. Market Sentiment
+        sentiment = symbol_data["sentiment_score"]
+        if sentiment > 2:
+            bull_score += 2
+            reasons.append("😊 Strong Bullish Sentiment")
+        elif sentiment < -2:
+            bear_score += 2
+            reasons.append("😰 Strong Bearish Sentiment")
             
         # Determine final signal
         score_difference = bull_score - bear_score
-        total_score = bull_score + bear_score
-        confidence = min(abs(score_difference) / max(total_score, 1) * 100, 100)
+        confidence = min(abs(score_difference) * 10, 100)  # Convert to percentage
         
-        if score_difference >= 3 and confidence > 60:
+        support = tf_15m.get('support', current_price * 0.98)
+        resistance = tf_15m.get('resistance', current_price * 1.02)
+        
+        if score_difference >= 3 and confidence > 50:
             signal["action"] = "LONG"
             signal["direction"] = "BULLISH"
             signal["confidence"] = confidence
             signal["entry_price"] = current_price
-            signal["stop_loss"] = support * 0.995  # 0.5% below support
+            signal["stop_loss"] = support * 0.995
             signal["take_profit"] = [
-                resistance * 0.99,  # TP1 at resistance
-                resistance * 1.02   # TP2 above resistance
+                resistance * 0.99,
+                resistance * 1.02
             ]
             signal["reason"] = reasons
             
-        elif score_difference <= -3 and confidence > 60:
+        elif score_difference <= -3 and confidence > 50:
             signal["action"] = "SHORT" 
             signal["direction"] = "BEARISH"
             signal["confidence"] = confidence
             signal["entry_price"] = current_price
-            signal["stop_loss"] = resistance * 1.005  # 0.5% above resistance
+            signal["stop_loss"] = resistance * 1.005
             signal["take_profit"] = [
-                support * 1.01,  # TP1 at support
-                support * 0.98   # TP2 below support
+                support * 1.01,
+                support * 0.98
             ]
             signal["reason"] = reasons
             
@@ -401,49 +455,49 @@ class EnhancedFuturesAnalyzer:
         score = 0
         details = []
 
-        # Funding Rate (Weight: 20%)
+        # Funding Rate (Weight: 25%)
         fund = symbol_data["funding"]
         if fund > 0.001:
-            score += 2.0
+            score += 2.5
             details.append("💰 Funding sangat positif")
         elif fund > 0.0001:
-            score += 1.0
+            score += 1.25
             details.append("💰 Funding positif")
         elif fund < -0.001:
-            score -= 2.0
+            score -= 2.5
             details.append("💰 Funding sangat negatif")
         elif fund < -0.0001:
-            score -= 1.0
+            score -= 1.25
             details.append("💰 Funding negatif")
 
-        # Open Interest (Weight: 15%)
+        # Open Interest (Weight: 20%)
         oi_change = symbol_data["oi_change"]
         if oi_change > 2:
-            score += 1.5
+            score += 2.0
             details.append("📈 OI meningkat kuat")
         elif oi_change > 0.5:
-            score += 0.75
+            score += 1.0
             details.append("📈 OI meningkat")
         elif oi_change < -2:
-            score -= 1.5
+            score -= 2.0
             details.append("📉 OI menurun kuat")
         elif oi_change < -0.5:
-            score -= 0.75
+            score -= 1.0
             details.append("📉 OI menurun")
 
-        # Taker Ratio (Weight: 15%)
+        # Taker Ratio (Weight: 20%)
         taker = symbol_data["taker_ratio"]
         if taker > 1.2:
-            score += 1.5
+            score += 2.0
             details.append("⚔️ Buyer sangat agresif")
         elif taker > 1.05:
-            score += 0.75
+            score += 1.0
             details.append("⚔️ Buyer agresif")
         elif taker < 0.8:
-            score -= 1.5
+            score -= 2.0
             details.append("⚔️ Seller sangat agresif")
         elif taker < 0.95:
-            score -= 0.75
+            score -= 1.0
             details.append("⚔️ Seller agresif")
 
         # Long/Short Ratio (Weight: 15%)
@@ -462,29 +516,29 @@ class EnhancedFuturesAnalyzer:
             score -= 0.75
             details.append("👥 Short dominance")
 
-        # Market Depth (Weight: 15%)
+        # Market Depth (Weight: 10%)
         depth = symbol_data["depth"]
         if depth["pressure"] > 1.2:
-            score += 1.5
+            score += 1.0
             details.append("🏊 Bid pressure kuat")
         elif depth["pressure"] > 1.05:
-            score += 0.75
+            score += 0.5
             details.append("🏊 Bid pressure")
         elif depth["pressure"] < 0.8:
-            score -= 1.5
+            score -= 1.0
             details.append("🏊 Ask pressure kuat")
         elif depth["pressure"] < 0.95:
-            score -= 0.75
+            score -= 0.5
             details.append("🏊 Ask pressure")
 
-        # Volume Analysis (Weight: 20%)
+        # Volume Analysis (Weight: 10%)
         volume_analysis = symbol_data["volume_analysis"]
         if volume_analysis["volume_spike"]:
             if volume_analysis["volume_trend"] == "INCREASING":
-                score += 2.0
+                score += 1.0
                 details.append("📊 Volume spike increasing")
             else:
-                score += 1.0
+                score += 0.5
                 details.append("📊 Volume spike terdeteksi")
 
         return score, details
@@ -493,17 +547,15 @@ class EnhancedFuturesAnalyzer:
         """Beri rekomendasi risk management berdasarkan skor dan sinyal entry"""
         risk_level = self.config["RISK_LEVEL"]
         price = price_data["price"]
-        change_24h = price_data["change_24h"]
 
         base_recommendation = ""
         entry_details = ""
 
         # Tambahkan detail entry signal jika ada
-        if entry_signal["action"] != "HOLD":
+        if entry_signal["action"] != "HOLD" and entry_signal["confidence"] > 50:
             action_emoji = "🟢" if entry_signal["action"] == "LONG" else "🔴"
             entry_details = (
-                f"\n🎯 <b>ENTRY SIGNAL: {entry_signal['action']}</b>\n"
-                f"📊 Confidence: <code>{entry_signal['confidence']:.1f}%</code>\n"
+                f"\n🎯 <b>ENTRY SIGNAL: {entry_signal['action']} ({entry_signal['confidence']:.0f}% confidence)</b>\n"
                 f"💰 Entry: <code>${entry_signal['entry_price']:,.2f}</code>\n"
                 f"🛡️ Stop Loss: <code>${entry_signal['stop_loss']:,.2f}</code>\n"
                 f"🎯 Take Profit: <code>${entry_signal['take_profit'][0]:,.2f}</code> | <code>${entry_signal['take_profit'][1]:,.2f}</code>\n"
@@ -511,55 +563,61 @@ class EnhancedFuturesAnalyzer:
             
             # Tambahkan alasan
             if entry_signal["reason"]:
-                entry_details += "📋 Reasons:\n• " + "\n• ".join(entry_signal["reason"][:5]) + "\n"
+                entry_details += "📋 Reasons:\n• " + "\n• ".join(entry_signal["reason"][:3]) + "\n"
 
         if score >= 6:
-            base_recommendation = "🟢 STRONG BULLISH - Konfirmasi bullish kuat dari multiple indikator"
+            base_recommendation = "🟢 STRONG BULLISH - Konfirmasi bullish kuat"
             if risk_level == "LOW":
-                return f"{base_recommendation}\n💡 Risk: Position kecil 1-2%, TP 3-5%, SL 2%{entry_details}"
+                return f"{base_recommendation}\n💡 Risk: Position 1-2%, TP 3-5%, SL 2%{entry_details}"
             elif risk_level == "MEDIUM":
-                return f"{base_recommendation}\n💡 Risk: Position medium 3-5%, TP 5-8%, SL 3%{entry_details}"
+                return f"{base_recommendation}\n💡 Risk: Position 3-5%, TP 5-8%, SL 3%{entry_details}"
             else:
-                return f"{base_recommendation}\n💡 Risk: Position besar 5-7%, TP 8-12%, SL 4%{entry_details}"
+                return f"{base_recommendation}\n💡 Risk: Position 5-7%, TP 8-12%, SL 4%{entry_details}"
 
         elif score >= 3:
             base_recommendation = "🟡 MILD BULLISH - Signal bullish moderat"
-            return f"{base_recommendation}\n💡 Risk: Position kecil 1-3%, TP 3-6%, SL 2.5%{entry_details}"
+            return f"{base_recommendation}\n💡 Risk: Position 1-3%, TP 3-6%, SL 2.5%{entry_details}"
 
         elif score >= 1:
             base_recommendation = "⚪️ NEUTRAL BULLISH - Sedikit bias bullish"
-            return f"{base_recommendation}\n💡 Risk: Wait for confirmation atau position sangat kecil 0.5-1%{entry_details}"
+            return f"{base_recommendation}\n💡 Risk: Wait confirmation atau position 0.5-1%{entry_details}"
 
         elif score <= -6:
             base_recommendation = "🔴 STRONG BEARISH - Konfirmasi bearish kuat"
             if risk_level == "LOW":
-                return f"{base_recommendation}\n💡 Risk: Position kecil 1-2%, TP 3-5%, SL 2%{entry_details}"
+                return f"{base_recommendation}\n💡 Risk: Position 1-2%, TP 3-5%, SL 2%{entry_details}"
             elif risk_level == "MEDIUM":
-                return f"{base_recommendation}\n💡 Risk: Position medium 3-5%, TP 5-8%, SL 3%{entry_details}"
+                return f"{base_recommendation}\n💡 Risk: Position 3-5%, TP 5-8%, SL 3%{entry_details}"
             else:
-                return f"{base_recommendation}\n💡 Risk: Position besar 5-7%, TP 8-12%, SL 4%{entry_details}"
+                return f"{base_recommendation}\n💡 Risk: Position 5-7%, TP 8-12%, SL 4%{entry_details}"
 
         elif score <= -3:
             base_recommendation = "🟠 MILD BEARISH - Signal bearish moderat"
-            return f"{base_recommendation}\n💡 Risk: Position kecil 1-3%, TP 3-6%, SL 2.5%{entry_details}"
+            return f"{base_recommendation}\n💡 Risk: Position 1-3%, TP 3-6%, SL 2.5%{entry_details}"
 
         elif score <= -1:
             base_recommendation = "⚪️ NEUTRAL BEARISH - Sedikit bias bearish"
-            return f"{base_recommendation}\n💡 Risk: Wait for confirmation atau position sangat kecil 0.5-1%{entry_details}"
+            return f"{base_recommendation}\n💡 Risk: Wait confirmation atau position 0.5-1%{entry_details}"
         else:
-            return f"⚖️ NEUTRAL - Market sideways, tunggu breakout\n💡 Risk: No position atau sangat kecil 0.5%{entry_details}"
+            return f"⚖️ NEUTRAL - Market sideways{entry_details}"
 
     def analyze_symbol(self, symbol: str):
-        """Analisis untuk satu simbol"""
+        """Analisis untuk satu simbol dengan comprehensive error handling"""
         try:
             print(f"📊 Analyzing {symbol}...")
 
-            # Collect semua data
+            # Collect semua data dengan error handling
             funding = self.get_funding_rate(symbol)
             times, oi = self.get_open_interest(symbol)
             taker_ratio = self.get_taker_ratio(symbol)
             long_ratio, short_ratio = self.get_long_short_ratio(symbol)
             price_data = self.get_price_data(symbol)
+            
+            # Skip jika price data invalid
+            if price_data["price"] == 0:
+                print(f"⚠️ [{symbol}] Invalid price data, skipping...")
+                return
+                
             depth = self.get_market_depth(symbol)
             
             # Analisis volume
@@ -607,35 +665,33 @@ class EnhancedFuturesAnalyzer:
                 f"📊 24h Change: <code>{price_data['change_24h']:+.2f}%</code>\n"
                 f"⬆️ High 24h: <code>${price_data['high_24h']:,.2f}</code>\n"
                 f"⬇️ Low 24h: <code>${price_data['low_24h']:,.2f}</code>\n"
-                f"💎 Volume: <code>{price_data['volume']:,.0f}</code>\n"
-                f"💰 Quote Volume: <code>${price_data['quote_volume']:,.0f}</code>\n\n"
+                f"💎 Volume: <code>{price_data['volume']:,.0f}</code>\n\n"
 
                 f"<b>📊 MARKET SENTIMENT:</b>\n"
                 f"💸 Funding: <code>{funding*100:+.4f}%</code>\n"
-                f"📈 OI Change: <code>{oi_change:+.3f}%</code>\n"
-                f"⚔️ Taker Ratio: <code>{taker_ratio:.3f}</code>\n"
-                f"👥 Long/Short: <code>{long_ratio:.3f}</code>/<code>{short_ratio:.3f}</code>\n"
-                f"🏊 Bid/Ask Pressure: <code>{depth['pressure']:.2f}</code>\n\n"
+                f"📈 OI Change: <code>{oi_change:+.2f}%</code>\n"
+                f"⚔️ Taker Ratio: <code>{taker_ratio:.2f}</code>\n"
+                f"👥 Long/Short: <code>{long_ratio:.2f}</code>/<code>{short_ratio:.2f}</code>\n"
+                f"🏊 Bid Pressure: <code>{depth['pressure']:.2f}</code>\n\n"
             )
 
             # Tambahkan volume analysis
-            if volume_analysis:
+            if volume_analysis and volume_analysis.get('volume_ratio', 1) != 1:
                 volume_emoji = "🚀" if volume_analysis["volume_spike"] else "📊"
                 message += (
                     f"<b>📊 VOLUME ANALYSIS:</b>\n"
                     f"{volume_emoji} Volume Ratio: <code>{volume_analysis['volume_ratio']:.2f}x</code>\n"
-                    f"📈 Volume Trend: <code>{volume_analysis['volume_trend']}</code>\n"
-                    f"💰 Avg Volume: <code>${volume_analysis['avg_volume']:,.0f}</code>\n\n"
+                    f"📈 Volume Trend: <code>{volume_analysis['volume_trend']}</code>\n\n"
                 )
 
             # Tambahkan technical indicators jika ada
             if technicals and '15m' in technicals:
                 tf = technicals['15m']
+                rsi_emoji = "🔴" if tf.get('rsi', 50) > 70 else "🟢" if tf.get('rsi', 50) < 30 else "🟡"
                 message += (
                     f"<b>🔧 TECHNICALS (15M):</b>\n"
                     f"📊 Trend: <code>{tf.get('trend', 'N/A')}</code>\n"
-                    f"📈 RSI: <code>{tf.get('rsi', 0):.1f}</code>\n"
-                    f"📉 MACD: <code>{tf.get('macd', 0):.4f}</code>\n"
+                    f"{rsi_emoji} RSI: <code>{tf.get('rsi', 0):.1f}</code>\n"
                     f"🛡️ Support: <code>${tf.get('support', 0):,.2f}</code>\n"
                     f"🎯 Resistance: <code>${tf.get('resistance', 0):,.2f}</code>\n\n"
                 )
@@ -643,7 +699,7 @@ class EnhancedFuturesAnalyzer:
             # Tambahkan scoring details
             message += f"<b>🎲 SENTIMENT SCORE: <code>{score:.1f}/10</code></b>\n"
             if score_details:
-                message += "📋 Details:\n• " + "\n• ".join(score_details) + "\n\n"
+                message += "📋 Key Factors:\n• " + "\n• ".join(score_details[:4]) + "\n\n"
 
             # Tambahkan rekomendasi
             message += f"<b>💡 RECOMMENDATION:</b>\n{recommendation}\n\n"
@@ -664,41 +720,49 @@ class EnhancedFuturesAnalyzer:
         except Exception as e:
             error_msg = f"❌ [{symbol}] Error: {str(e)}"
             print(error_msg)
-            self.send_telegram(f"❌ <b>Error analyzing {symbol}:</b>\n{str(e)}", symbol)
+            # Jangan kirim error ke Telegram untuk avoid spam
+            # self.send_telegram(f"❌ <b>Error analyzing {symbol}:</b>\n{str(e)}", symbol)
 
     def analyze_all_symbols(self):
         """Analisis semua simbol dalam konfigurasi"""
         print(f"\n🔄 Memulai analisis {len(self.config['SYMBOLS'])} simbol...")
-        print("=" * 60)
+        print("=" * 50)
 
+        successful_analysis = 0
         for symbol in self.config["SYMBOLS"]:
-            self.analyze_symbol(symbol)
-            # Jeda antara simbol untuk avoid rate limit
-            time.sleep(2)
+            try:
+                self.analyze_symbol(symbol)
+                successful_analysis += 1
+            except Exception as e:
+                print(f"❌ Failed to analyze {symbol}: {e}")
+            
+            # Jeda lebih panjang antara simbol
+            time.sleep(3)
 
-        print("=" * 60)
-        print(f"✅ Semua analisis selesai - Menunggu {self.config['INTERVAL']//60} menit")
+        print("=" * 50)
+        print(f"✅ {successful_analysis}/{len(self.config['SYMBOLS'])} analisis berhasil")
+        print(f"⏳ Menunggu {self.config['INTERVAL']//60} menit...")
 
     def run(self):
         """Jalankan monitor secara kontinu"""
-        print("🚀 ENHANCED FUTURES MULTI-ASSET MONITOR DIMULAI")
+        print("🚀 ENHANCED FUTURES ANALYZER DIMULAI")
         print(f"📍 Timezone: {self.config['TIMEZONE']}")
         print(f"📊 Symbols: {', '.join(self.config['SYMBOLS'])}")
-        print(f"⏰ Interval: {self.config['INTERVAL']} detik")
+        print(f"⏰ Interval: {self.config['INTERVAL']//60} menit")
         print(f"🎯 Risk Level: {self.config['RISK_LEVEL']}")
-        print(f"📈 Volume Threshold: {self.config['VOLUME_THRESHOLD']}x")
-        print("=" * 60)
+        print(f"🛡️ Max Retries: {self.config['MAX_RETRIES']}")
+        print("=" * 50)
 
         while True:
             try:
                 self.analyze_all_symbols()
             except Exception as e:
                 print(f"❌ Main loop error: {e}")
-                self.send_telegram(f"❌ <b>System Error:</b>\n{str(e)}", "SYSTEM")
+                # Wait longer if there's a major error
+                time.sleep(60)
 
             wait_minutes = self.config["INTERVAL"] // 60
             print(f"⏳ Menunggu {wait_minutes} menit hingga analisis berikutnya...")
-            print("=" * 60)
             time.sleep(self.config["INTERVAL"])
 
 def main():
