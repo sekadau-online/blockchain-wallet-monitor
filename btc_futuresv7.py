@@ -19,7 +19,7 @@ CONFIG = {
 
     # Analysis Timing
     "INTERVAL": 60 * 1,  # 1 menit dalam detik
-    "TIMEZONE": "Asia/Jakarta",  # Diperbaiki timezone
+    "TIMEZONE": "Asia/Pontianak",  # Tetap menggunakan Asia/Pontianak
 
     # Risk Management
     "RISK_LEVEL": "MEDIUM",  # LOW, MEDIUM, HIGH
@@ -54,7 +54,7 @@ CONFIG = {
 
     # Technical Analysis Timeframes
     "TIMEFRAMES": ["15m", "1h"],
-    "KLINE_LIMIT": 100,  # Diperbaiki untuk data yang cukup
+    "KLINE_LIMIT": 100,
     "MAIN_TIMEFRAME": "15m",
 
     # Support Resistance Parameters
@@ -139,7 +139,7 @@ CONFIG = {
     "PRICE_MONITOR_INTERVAL": 10,  # Detik
 }
 
-# ✅ Perbaiki URL dasar
+# ✅ URL dasar
 BASE_URL = "https://fapi.binance.com"
 TELEGRAM_BASE_URL = "https://api.telegram.org/bot"
 
@@ -153,7 +153,7 @@ class FlashCrashDetector:
         
         for symbol in CONFIG["REALTIME_SYMBOLS"]:
             self.price_history[symbol] = {
-                'prices': deque(maxlen=30),  # 5 menit data (10s interval)
+                'prices': deque(maxlen=30),
                 'timestamps': deque(maxlen=30),
                 'volumes': deque(maxlen=30)
             }
@@ -173,7 +173,7 @@ class FlashCrashDetector:
             try:
                 for symbol in CONFIG["REALTIME_SYMBOLS"]:
                     self._check_symbol_price(symbol)
-                    time.sleep(2)  # Delay antara simbol
+                    time.sleep(2)
                 
                 time.sleep(CONFIG["PRICE_MONITOR_INTERVAL"])
             except Exception as e:
@@ -183,7 +183,6 @@ class FlashCrashDetector:
     def _check_symbol_price(self, symbol: str):
         """Cek pergerakan harga real-time untuk satu simbol"""
         try:
-            # Dapatkan data harga terbaru
             url = f"{BASE_URL}/fapi/v1/ticker/24hr?symbol={symbol}"
             data = self.analyzer.safe_get(url, max_retries=1)
             
@@ -194,13 +193,11 @@ class FlashCrashDetector:
             current_volume = float(data.get('quoteVolume', 0))
             current_time = time.time()
             
-            # Update history
             history = self.price_history[symbol]
             history['prices'].append(current_price)
             history['timestamps'].append(current_time)
             history['volumes'].append(current_volume)
             
-            # Cek flash crash conditions
             self._detect_flash_crash(symbol, history, current_price, current_volume)
             self._detect_volume_spike(symbol, history, current_volume)
             
@@ -209,18 +206,15 @@ class FlashCrashDetector:
 
     def _detect_flash_crash(self, symbol: str, history: Dict, current_price: float, current_volume: float):
         """Deteksi flash crash berdasarkan pergerakan harga"""
-        if len(history['prices']) < 6:  # Minimal 1 menit data
+        if len(history['prices']) < 6:
             return
             
-        # Hitung perubahan harga 5 menit terakhir
         five_min_ago = time.time() - 300
         recent_prices = []
-        recent_times = []
         
         for i, timestamp in enumerate(history['timestamps']):
             if timestamp >= five_min_ago:
                 recent_prices.append(history['prices'][i])
-                recent_times.append(timestamp)
         
         if len(recent_prices) < 2:
             return
@@ -228,9 +222,8 @@ class FlashCrashDetector:
         max_price = max(recent_prices)
         price_drop = (max_price - current_price) / max_price
         
-        # Jika drop signifikan terdeteksi
         if price_drop >= CONFIG["FLASH_CRASH_THRESHOLD"]:
-            if time.time() - self.alert_cooldown.get(symbol, 0) > 300:  # Cooldown 5 menit
+            if time.time() - self.alert_cooldown.get(symbol, 0) > 300:
                 self._trigger_flash_crash_alert(symbol, price_drop, current_price, max_price, current_volume)
                 self.alert_cooldown[symbol] = time.time()
 
@@ -239,7 +232,7 @@ class FlashCrashDetector:
         if len(history['volumes']) < 10:
             return
             
-        avg_volume = np.mean(list(history['volumes'])[:-1])  # Exclude current volume
+        avg_volume = np.mean(list(history['volumes'])[:-1])
         if avg_volume <= 0:
             return
             
@@ -249,22 +242,6 @@ class FlashCrashDetector:
             if time.time() - self.alert_cooldown.get(f"{symbol}_volume", 0) > 300:
                 self._trigger_volume_alert(symbol, volume_ratio, current_volume, avg_volume)
                 self.alert_cooldown[f"{symbol}_volume"] = time.time()
-
-    def _check_liquidations(self, symbol: str):
-        """Cek liquidasi besar - placeholder implementation"""
-        try:
-            # Untuk Binance Futures, kita bisa cek melalui endpoint premium index
-            url = f"{BASE_URL}/fapi/v1/premiumIndex?symbol={symbol}"
-            data = self.analyzer.safe_get(url, max_retries=1)
-            
-            if data:
-                # Monitor funding rate changes yang ekstrem
-                funding_rate = float(data.get('lastFundingRate', 0))
-                if abs(funding_rate) > 0.01:  # Funding rate > 1%
-                    self._trigger_funding_alert(symbol, funding_rate)
-                    
-        except Exception as e:
-            print(f"⚠️ Liquidation check error: {e}")
 
     def _trigger_flash_crash_alert(self, symbol: str, drop_percent: float, current_price: float, 
                                  max_price: float, volume: float):
@@ -304,36 +281,18 @@ class FlashCrashDetector:
         self.analyzer.send_telegram(message, f"VOLUME_{symbol}")
         print(f"📊 Volume Spike for {symbol}: {volume_ratio:.1f}x")
 
-    def _trigger_funding_alert(self, symbol: str, funding_rate: float):
-        """Trigger alert untuk funding rate ekstrem"""
-        message = (
-            f"💰 <b>EXTREME FUNDING RATE!</b>\n"
-            f"<b>Symbol:</b> {symbol}\n"
-            f"<b>Funding Rate:</b> <code>{funding_rate*100:+.4f}%</code>\n"
-            f"<b>Time:</b> {self.analyzer.get_local_time()}\n\n"
-            f"<i>High funding may indicate market stress</i>"
-        )
-        
-        self.analyzer.send_telegram(message, f"FUNDING_{symbol}")
-        print(f"💰 Extreme Funding for {symbol}: {funding_rate*100:+.4f}%")
-
-    def add_price_alert(self, symbol: str, target_price: float, condition: str = "below"):
-        """Tambahkan price alert manual"""
-        print(f"💰 Price alert added: {symbol} {condition} ${target_price:,.2f}")
-
 
 class EnhancedFuturesAnalyzer:
     def __init__(self, config: Dict):
         self.config = config
         self.session = requests.Session()
         self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         })
         self.analysis_history = {}
         self.volume_history = {}
         self.price_history = {}
 
-        # Inisialisasi Flash Crash Detector
         self.crash_detector = FlashCrashDetector(self)
 
         for symbol in config["SYMBOLS"]:
@@ -341,11 +300,11 @@ class EnhancedFuturesAnalyzer:
             self.price_history[symbol] = deque(maxlen=config["PRICE_HISTORY_LENGTH"])
 
     def get_local_time(self):
-        """Dapatkan waktu lokal Indonesia"""
+        """Dapatkan waktu lokal Asia/Pontianak (UTC+7)"""
         utc_time = datetime.datetime.now(datetime.timezone.utc)
-        # WIB (UTC+7)
+        # Asia/Pontianak = UTC+7
         local_time = utc_time + datetime.timedelta(hours=7)
-        return local_time.strftime("%Y-%m-%d %H:%M:%S WIB")
+        return local_time.strftime("%Y-%m-%d %H:%M:%S") + " (Asia/Pontianak)"
 
     def safe_get(self, url: str, max_retries: int = None):
         """Safe HTTP GET request dengan retry mechanism"""
@@ -417,7 +376,6 @@ class EnhancedFuturesAnalyzer:
     def get_open_interest(self, symbol: str) -> tuple:
         """Dapatkan open interest data"""
         try:
-            # Gunakan endpoint yang lebih sederhana
             url = f"{BASE_URL}/fapi/v1/openInterest?symbol={symbol}"
             data = self.safe_get(url)
             if data:
@@ -430,11 +388,9 @@ class EnhancedFuturesAnalyzer:
     def get_taker_ratio(self, symbol: str) -> float:
         """Dapatkan taker buy/sell ratio"""
         try:
-            # Gunakan endpoint yang tersedia
             url = f"{BASE_URL}/fapi/v1/ticker/24hr?symbol={symbol}"
             data = self.safe_get(url)
             if data:
-                # Estimasi sederhana berdasarkan volume
                 buy_volume = float(data.get("volume", 0))
                 sell_volume = float(data.get("quoteVolume", 0))
                 if sell_volume > 0:
@@ -447,8 +403,6 @@ class EnhancedFuturesAnalyzer:
     def get_long_short_ratio(self, symbol: str) -> tuple:
         """Dapatkan long/short ratio"""
         try:
-            # Untuk Binance, data ini tidak tersedia secara publik
-            # Return default values
             return 0.5, 0.5
         except Exception as e:
             print(f"⚠️ Error getting long/short ratio for {symbol}: {e}")
@@ -597,28 +551,21 @@ class EnhancedFuturesAnalyzer:
                 closes = np.array([float(c[4]) for c in data])
                 highs = np.array([float(h[2]) for h in data])
                 lows = np.array([float(l[3]) for l in data])
-                volumes = np.array([float(v[5]) for v in data])
 
-                # Simple Moving Averages
                 sma_short = np.mean(closes[-self.config["SMA_SHORT"]:])
                 sma_long = np.mean(closes[-self.config["SMA_LONG"]:])
                 
-                # Exponential Moving Averages
                 ema_short = self.calculate_ema(closes, self.config["EMA_SHORT"])
                 ema_long = self.calculate_ema(closes, self.config["EMA_LONG"])
                 
-                # RSI
                 rsi = self.calculate_rsi(closes, self.config["RSI_PERIOD"])
                 
-                # Support Resistance
                 resistance = np.max(highs[-self.config["SR_PERIOD"]:])
                 support = np.min(lows[-self.config["SR_PERIOD"]:])
                 
-                # Momentum
                 momentum = ((closes[-1] - closes[-self.config["MOMENTUM_PERIOD"]]) / 
                           closes[-self.config["MOMENTUM_PERIOD"]]) * 100 if closes[-self.config["MOMENTUM_PERIOD"]] > 0 else 0
 
-                # Trend Analysis
                 price_trend = "NEUTRAL"
                 if ema_short > ema_long and closes[-1] > sma_long * self.config["TREND_STRONG_THRESHOLD"]:
                     price_trend = "STRONG_BULLISH"
@@ -760,9 +707,7 @@ class EnhancedFuturesAnalyzer:
                 score += 5 * self.config["WEIGHT_VOLUME"]
                 details.append("📊 Volume spike terdeteksi")
 
-        # Normalisasi score ke range [-10, 10]
-        max_possible_score = 10.0
-        normalized_score = np.clip(score / 10.0, -max_possible_score, max_possible_score)
+        normalized_score = np.clip(score / 10.0, -10, 10)
         
         return normalized_score, details
 
@@ -794,7 +739,6 @@ class EnhancedFuturesAnalyzer:
                 "reason": ["Insufficient technical data"]
             }
 
-        # Risk adjustment
         risk_adj = {"LOW": 1.5, "MEDIUM": 1.0, "HIGH": 0.7}
         adj = risk_adj[self.config["RISK_LEVEL"]]
         min_confidence = self.config["MIN_CONFIDENCE"] * adj
@@ -804,7 +748,6 @@ class EnhancedFuturesAnalyzer:
         bear_score = 0
         reasons = []
 
-        # Multi-timeframe consensus
         multi_tf = self.get_multi_tf_consensus(technicals)
         if multi_tf == "BULLISH":
             bull_score += 2
@@ -813,7 +756,6 @@ class EnhancedFuturesAnalyzer:
             bear_score += 2
             reasons.append("❌ Multi-timeframe bearish")
 
-        # Trend analysis
         trend = main_tf.get('trend', 'NEUTRAL')
         if 'BULLISH' in trend:
             bull_score += 3
@@ -822,7 +764,6 @@ class EnhancedFuturesAnalyzer:
             bear_score += 3
             reasons.append(f"📉 Trend {trend}")
 
-        # RSI analysis
         rsi = main_tf.get('rsi', 50)
         if rsi < self.config["RSI_OVERSOLD"]:
             bull_score += 2
@@ -831,7 +772,6 @@ class EnhancedFuturesAnalyzer:
             bear_score += 2
             reasons.append("🔺 RSI Overbought")
 
-        # Price vs SMA
         sma_long = main_tf.get('sma_long', current_price)
         if current_price > sma_long * self.config["TREND_WEAK_THRESHOLD"]:
             bull_score += 1
@@ -840,7 +780,6 @@ class EnhancedFuturesAnalyzer:
             bear_score += 1
             reasons.append("💰 Price below SMA")
 
-        # Volume analysis
         if volume_analysis.get('volume_spike'):
             if symbol_data["sentiment_score"] > 0:
                 bull_score += 2
@@ -849,7 +788,6 @@ class EnhancedFuturesAnalyzer:
                 bear_score += 2
                 reasons.append("📊 Volume Spike Bearish")
 
-        # Sentiment score
         sentiment = symbol_data["sentiment_score"]
         if sentiment > 2:
             bull_score += 2
@@ -942,7 +880,6 @@ class EnhancedFuturesAnalyzer:
         try:
             print(f"📊 Analyzing {symbol}...")
 
-            # Collect data
             funding = self.get_funding_rate(symbol)
             times, oi = self.get_open_interest(symbol)
             taker_ratio = self.get_taker_ratio(symbol)
@@ -961,7 +898,6 @@ class EnhancedFuturesAnalyzer:
             volume_analysis = self.calculate_volume_analysis(symbol, price_data["quote_volume"])
             technicals = self.calculate_advanced_technicals(symbol)
 
-            # Calculate OI change
             oi_change = 0
             if len(oi) >= 2 and oi[-2] > 0:
                 oi_change = ((oi[-1] - oi[-2]) / oi[-2]) * 100
@@ -985,7 +921,6 @@ class EnhancedFuturesAnalyzer:
 
             local_time = self.get_local_time()
 
-            # Build message
             message = (
                 f"<b>🎯 {symbol} FUTURES ANALYSIS</b>\n"
                 f"⏰ Waktu: {local_time}\n\n"
@@ -1037,7 +972,6 @@ class EnhancedFuturesAnalyzer:
             print(f"✅ [{symbol}] Analysis completed - Score: {score:.1f}")
             self.send_telegram(message, symbol)
 
-            # Save to history
             self.analysis_history[symbol] = {
                 "timestamp": time.time(),
                 "score": score,
@@ -1047,8 +981,6 @@ class EnhancedFuturesAnalyzer:
 
         except Exception as e:
             print(f"❌ [{symbol}] Analysis error: {e}")
-            import traceback
-            traceback.print_exc()
 
     def start_flash_crash_monitoring(self):
         """Memulai monitoring flash crash"""
@@ -1065,7 +997,7 @@ class EnhancedFuturesAnalyzer:
                 successful += 1
             except Exception as e:
                 print(f"❌ Failed to analyze {symbol}: {e}")
-            time.sleep(3)  # Delay antara simbol
+            time.sleep(3)
         print("=" * 60)
         print(f"✅ {successful}/{len(self.config['SYMBOLS'])} analyses completed")
         print(f"⏳ Waiting {self.config['INTERVAL']//60} minutes...")
@@ -1078,13 +1010,10 @@ class EnhancedFuturesAnalyzer:
         print(f"⏰ Interval: {self.config['INTERVAL']//60} minutes")
         print(f"🎯 Risk Level: {self.config['RISK_LEVEL']}")
         print(f"📈 Main Timeframe: {self.config['MAIN_TIMEFRAME']}")
-        print(f"🛡️ Max Retries: {self.config['MAX_RETRIES']}")
         print("=" * 60)
 
-        # Mulai flash crash monitoring
         self.start_flash_crash_monitoring()
 
-        # Main loop
         while True:
             try:
                 self.analyze_all_symbols()
